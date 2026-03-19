@@ -209,7 +209,7 @@ export default function Home() {
   }
 
   return (
-    <main className="max-w-2xl mx-auto px-4 py-8 font-sans text-gray-900">
+    <main className="max-w-2xl mx-auto px-4 py-8 font-sans text-gray-900 bg-white min-h-screen">
       <div className="mb-6">
         <p className="text-xs font-bold tracking-widest text-gray-400 uppercase mb-1">Agency Five Eighty · PDP Copy Intelligence</p>
         <h1 className="text-2xl font-extrabold tracking-tight text-[#0F1E3C] mb-1">Brand Ad Intelligence Agent</h1>
@@ -225,7 +225,7 @@ export default function Home() {
           onKeyDown={e => e.key === "Enter" && !running && run()}
           disabled={running}
           placeholder="Enter brand name  (e.g. Pendleton Whiskey)"
-          className="flex-1 px-4 py-3 rounded-lg border-2 border-gray-200 text-sm focus:outline-none focus:border-blue-600 focus:ring-2 focus:ring-blue-100 disabled:opacity-50"
+          className="flex-1 px-4 py-3 rounded-lg border-2 border-gray-200 bg-white text-gray-900 text-sm focus:outline-none focus:border-blue-600 focus:ring-2 focus:ring-blue-100 disabled:opacity-50"
         />
         <button
           onClick={run}
