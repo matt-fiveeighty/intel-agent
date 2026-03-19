@@ -14,11 +14,19 @@ const STAGES = [
   { id: "pdf", label: "Building PDF Report", icon: "📄" },
 ];
 
-async function callClaude(system: string, user: string, search = false): Promise<string> {
+type Tier = "haiku" | "sonnet";
+
+async function callClaude(
+  system: string,
+  user: string,
+  search = false,
+  tier: Tier = "haiku",
+  maxTokens = 600
+): Promise<string> {
   const res = await fetch("/api/claude", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ system, user, search }),
+    body: JSON.stringify({ system, user, search, tier, maxTokens }),
   });
   const d = await res.json();
   if (!res.ok) throw new Error((d as { error?: string }).error ?? "Claude API error");
@@ -43,13 +51,24 @@ function parseObj(raw: string): Record<string, unknown> {
   return {};
 }
 
-async function searchChannel(brand: string, desc: string): Promise<string[]> {
+// Single search call returns all 4 channels — replaces 4 separate calls
+async function searchAllChannels(brand: string): Promise<Record<string, string[]>> {
   const r = await callClaude(
-    `Brand intelligence researcher. Extract real advertising copy. Return ONLY a JSON array of strings. No markdown.`,
-    `Find recent (6 months) ad copy from "${brand}" on: ${desc}. Short phrases under 120 chars only.`,
-    true
+    `Brand intelligence researcher. Extract real advertising copy. Return ONLY a JSON object. No markdown.`,
+    `Find recent ad copy from "${brand}" across these 4 channels. Return ONLY:
+{"meta":["up to 8 Meta/Facebook/Instagram paid ad phrases"],"social":["up to 8 organic social captions/hashtags"],"ecom":["up to 8 Amazon/retailer product headlines"],"digital":["up to 8 Google/display/YouTube ad phrases"]}
+Short phrases under 100 chars each. Real copy only.`,
+    true,
+    "haiku",
+    800
   );
-  return parseArr(r);
+  const obj = parseObj(r) as Record<string, unknown>;
+  return {
+    "Meta Ads": Array.isArray(obj.meta) ? obj.meta as string[] : [],
+    "Social":   Array.isArray(obj.social) ? obj.social as string[] : [],
+    "Ecom":     Array.isArray(obj.ecom) ? obj.ecom as string[] : [],
+    "Digital":  Array.isArray(obj.digital) ? obj.digital as string[] : [],
+  };
 }
 
 interface PdpPage { name: string; url: string; copy: string[]; }
@@ -59,18 +78,23 @@ interface CopyData { headlines?: string[]; ultraShort?: string[]; }
 interface ReportData { brand: string; voice: VoiceData; copy: CopyData; rawCopy: string[]; pdpPages: PdpPage[]; images: ImageItem[]; channelCopy: Record<string, string[]>; }
 
 async function scrapePDPs(brand: string): Promise<PdpPage[]> {
+  // 1 call to get URLs, then 3 scrapes (down from 5)
   const urlRaw = await callClaude(
-    `Product research agent. Find PDP page URLs. Return ONLY JSON array: [{"name":"...","url":"..."}]. Max 5. No markdown.`,
-    `Find top 5 product detail pages for "${brand}" across: official brand website, Amazon.com, Total Wine or major retailer, Drizly or delivery platform, and one more major retailer. Return actual URLs.`,
-    true
+    `Product research agent. Find PDP URLs. Return ONLY JSON array: [{"name":"...","url":"..."}]. Max 3. No markdown.`,
+    `Find top 3 product detail pages for "${brand}": official brand site, Amazon, and one major retailer. Return actual URLs.`,
+    true,
+    "haiku",
+    400
   );
   const urls = parseArr(urlRaw) as unknown as Array<{ name?: string; url?: string }>;
   const pages: PdpPage[] = [];
-  for (const p of urls.slice(0, 5)) {
+  for (const p of urls.slice(0, 3)) {
     const copyRaw = await callClaude(
       `Copy scraper. Extract product copy. Return ONLY a JSON array of strings. No markdown.`,
-      `Fetch and extract all copy from: ${p.url ?? ""}. Include: headline, sub-headline, bullets, callouts, CTAs, badges, promo text. JSON array only.`,
-      true
+      `Extract key copy from: ${p.url ?? ""}. Headlines, bullets, CTAs only. JSON array, max 10 strings.`,
+      true,
+      "haiku",
+      500
     );
     pages.push({ name: p.name ?? "Retailer", url: p.url ?? "", copy: parseArr(copyRaw) });
   }
@@ -78,26 +102,37 @@ async function scrapePDPs(brand: string): Promise<PdpPage[]> {
 }
 
 async function collectImages(brand: string): Promise<ImageItem[]> {
+  // Single lightweight call, no web search — just structured placeholders from known channels
   const r = await callClaude(
-    `Visual research agent. Find ad image URLs. Return ONLY JSON array: [{"url":"...","label":"...","channel":"..."}]. Direct image URLs only. Max 12. No markdown.`,
-    `Find actual ad image URLs for "${brand}" from Meta Ad Library, Instagram/social posts, official website, and Google Images for "${brand} advertisement". Format: [{"url":"https://...","label":"description","channel":"Meta Ads|Social|Brand Site|Digital"}]`,
-    true
+    `Visual research agent. Return ONLY JSON array: [{"url":"...","label":"...","channel":"..."}]. No markdown.`,
+    `List up to 6 known ad image sources for "${brand}" — Meta Ad Library URL, official site, Instagram. Use real URLs where known, otherwise omit.`,
+    false,
+    "haiku",
+    400
   );
   return parseArr(r) as unknown as ImageItem[];
 }
 
 async function synthesize(brand: string, allCopy: string[]): Promise<VoiceData> {
+  // Sonnet for quality synthesis, capped input to top 25 samples
   const r = await callClaude(
     `Senior creative strategist. Analyze copy, return brand voice JSON. Pure JSON object, no markdown.`,
-    `Brand: ${brand}\n\nCopy samples:\n${allCopy.slice(0, 40).map((c, i) => `${i + 1}. "${c}"`).join("\n")}\n\nReturn ONLY:\n{"toneWords":["4-5 adjectives"],"themes":["4-5 themes"],"patterns":["2-3 patterns"],"avoid":["2-3 avoids"],"summary":"2-3 sentence voice summary"}`
+    `Brand: ${brand}\n\nCopy samples:\n${allCopy.slice(0, 25).map((c, i) => `${i + 1}. "${c}"`).join("\n")}\n\nReturn ONLY:\n{"toneWords":["4-5 adjectives"],"themes":["3-4 themes"],"patterns":["2 patterns"],"avoid":["2 avoids"],"summary":"2 sentence voice summary"}`,
+    false,
+    "sonnet",
+    800
   );
   return parseObj(r) as VoiceData;
 }
 
 async function genCopy(brand: string, voice: VoiceData, allCopy: string[]): Promise<CopyData> {
+  // Sonnet for copy quality
   const r = await callClaude(
-    `Expert PDP copywriter. Write in established brand voice. Pure JSON, no markdown.`,
-    `Brand: ${brand}\nVoice: ${voice.summary ?? ""}\nTone: ${(voice.toneWords ?? []).join(", ")}\nThemes: ${(voice.themes ?? []).join(", ")}\n\nSample brand copy:\n${allCopy.slice(0, 20).map(c => `"${c}"`).join("\n")}\n\nReturn ONLY:\n{"headlines":["12 headlines 8 words or fewer"],"ultraShort":["5 hooks 3 words or fewer"]}`
+    `Expert copywriter. Write in established brand voice. Pure JSON, no markdown.`,
+    `Brand: ${brand}\nVoice: ${voice.summary ?? ""}\nTone: ${(voice.toneWords ?? []).join(", ")}\n\nSample copy:\n${allCopy.slice(0, 15).map(c => `"${c}"`).join("\n")}\n\nReturn ONLY:\n{"headlines":["10 headlines 8 words or fewer"],"ultraShort":["5 hooks 3 words or fewer"]}`,
+    false,
+    "sonnet",
+    800
   );
   return parseObj(r) as CopyData;
 }
@@ -140,21 +175,16 @@ export default function Home() {
     setRunning(true); setDone(false); setResult(null); setError(null);
     const allCopy: string[] = [], channelCopy: Record<string, string[]> = {};
     try {
+      // Single call covers all 4 channels — replaces 4 separate API calls
       setStage("meta");
-      const mc = await searchChannel(brand, "Meta Ad Library (facebook.com/ads/library), Facebook and Instagram paid ads");
-      channelCopy["Meta Ads"] = mc; allCopy.push(...mc);
-
+      const channels = await searchAllChannels(brand);
+      for (const [key, vals] of Object.entries(channels)) {
+        channelCopy[key] = vals;
+        allCopy.push(...vals);
+      }
       setStage("social");
-      const sc = await searchChannel(brand, "Instagram organic posts, Twitter/X, TikTok captions, hashtag campaigns");
-      channelCopy["Social"] = sc; allCopy.push(...sc);
-
       setStage("ecom");
-      const ec = await searchChannel(brand, "Amazon listings, brand ecom pages, promotional banners, product headlines on retail sites");
-      channelCopy["Ecom"] = ec; allCopy.push(...ec);
-
       setStage("digital");
-      const dc = await searchChannel(brand, "Digital display ads, Google search ads, YouTube pre-roll copy, landing page heroes");
-      channelCopy["Digital"] = dc; allCopy.push(...dc);
 
       setStage("pdp");
       const pdpPages = await scrapePDPs(brand);
